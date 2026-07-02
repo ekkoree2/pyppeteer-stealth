@@ -1,3 +1,5 @@
+DEFAULT_TIMEOUT_MS: int = 30000
+
 CHROME_PATHS: list[str] = [
     "/usr/bin/google-chrome",
     "/usr/bin/chromium-browser",

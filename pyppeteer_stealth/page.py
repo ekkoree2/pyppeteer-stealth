@@ -3,7 +3,8 @@ import base64
 from typing import Any, Optional
 
 from .connection import CdpConnection
-from .constants import STEALTH_SCRIPT
+from .constants import DEFAULT_TIMEOUT_MS, STEALTH_SCRIPT
+from .mode import Mode
 
 
 class Page:
@@ -19,6 +20,7 @@ class Page:
         await self._send("Page.enable")
         await self._send("Runtime.enable")
         await self._send("Network.enable")
+        await self._send("DOM.enable")
 
     async def applyStealth(self) -> None:
         await self._send(
@@ -55,3 +57,57 @@ class Page:
         result = await self._send("Page.captureScreenshot", {"format": "png"})
         with open(path, "wb") as fileHandle:
             fileHandle.write(base64.b64decode(result["data"]))
+
+    def _buildExpression(self, selector: str, mode: Mode) -> str:
+        if mode is Mode.XPATH:
+            return (
+                f"document.evaluate({selector!r}, document, null, "
+                "XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue"
+            )
+        return f"document.querySelector({selector!r})"
+
+    async def _locate(self, selector: str, mode: Mode, timeoutMs: int) -> str:
+        expression = self._buildExpression(selector, mode)
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeoutMs / 1000
+        while True:
+            result = await self._send("Runtime.evaluate", {"expression": expression})
+            objectId = result.get("result", {}).get("objectId")
+            if objectId:
+                return objectId
+            if loop.time() >= deadline:
+                raise RuntimeError(f"element not found: {selector}")
+            await asyncio.sleep(0.1)
+
+    async def click(
+        self,
+        selector: str,
+        mode: Mode = Mode.CSS,
+        timeoutMs: int = DEFAULT_TIMEOUT_MS,
+    ) -> None:
+        objectId = await self._locate(selector, mode, timeoutMs)
+        box = await self._send("DOM.getBoxModel", {"objectId": objectId})
+        quad = box["model"]["content"]
+        x = (quad[0] + quad[4]) / 2
+        y = (quad[1] + quad[5]) / 2
+        await self._send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+        await self._send(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+        )
+        await self._send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+        )
+
+    async def type(
+        self,
+        selector: str,
+        text: str,
+        mode: Mode = Mode.CSS,
+        timeoutMs: int = DEFAULT_TIMEOUT_MS,
+    ) -> None:
+        await self.click(selector, mode, timeoutMs)
+        for char in text:
+            await self._send("Input.dispatchKeyEvent", {"type": "keyDown", "text": char})
+            await self._send("Input.dispatchKeyEvent", {"type": "keyUp", "text": char})
