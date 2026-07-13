@@ -19,11 +19,58 @@ class Page:
         self.connection: CdpConnection = connection
         self.sessionId: str = sessionId
         self.targetId: str = targetId
+        self.contextsByFrame: dict[str, int] = {}
+        self.frameUrls: dict[str, str] = {}
 
     async def _send(self, method: str, params: Optional[dict] = None) -> dict:
         return await self.connection.send(method, params, self.sessionId)
 
+    def _onContextCreated(self, params: dict, sessionId: Optional[str]) -> None:
+        if sessionId != self.sessionId:
+            return
+        context = params.get("context", {})
+        aux = context.get("auxData", {}) or {}
+        if aux.get("type") == "isolated":
+            return
+        frameId = aux.get("frameId")
+        if frameId:
+            self.contextsByFrame[frameId] = context.get("id")
+
+    def _onContextDestroyed(self, params: dict, sessionId: Optional[str]) -> None:
+        if sessionId != self.sessionId:
+            return
+        cid = params.get("id")
+        for frameId, ctxId in list(self.contextsByFrame.items()):
+            if ctxId == cid:
+                del self.contextsByFrame[frameId]
+
+    def _onContextsCleared(self, params: dict, sessionId: Optional[str]) -> None:
+        if sessionId != self.sessionId:
+            return
+        self.contextsByFrame.clear()
+
+    def _onFrameNavigated(self, params: dict, sessionId: Optional[str]) -> None:
+        if sessionId != self.sessionId:
+            return
+        frame = params.get("frame", {})
+        fid = frame.get("id")
+        if fid:
+            self.frameUrls[fid] = frame.get("url", "")
+
+    def _onFrameDetached(self, params: dict, sessionId: Optional[str]) -> None:
+        if sessionId != self.sessionId:
+            return
+        fid = params.get("frameId")
+        if fid:
+            self.frameUrls.pop(fid, None)
+            self.contextsByFrame.pop(fid, None)
+
     async def initialize(self) -> None:
+        self.connection.on("Runtime.executionContextCreated", self._onContextCreated)
+        self.connection.on("Runtime.executionContextDestroyed", self._onContextDestroyed)
+        self.connection.on("Runtime.executionContextsCleared", self._onContextsCleared)
+        self.connection.on("Page.frameNavigated", self._onFrameNavigated)
+        self.connection.on("Page.frameDetached", self._onFrameDetached)
         await self._send("Page.enable")
         await self._send("Runtime.enable")
         await self._send("Network.enable")
@@ -89,6 +136,26 @@ class Page:
         )
         return result.get("result", {}).get("value")
 
+    async def evaluateInContext(self, contextId: int, expression: str) -> Any:
+        result = await self._send(
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "contextId": contextId,
+                "returnByValue": True,
+                "awaitPromise": True,
+            },
+        )
+        return result.get("result", {}).get("value")
+
+    def contextForFrameUrl(self, fragment: str) -> Optional[int]:
+        for frameId, url in self.frameUrls.items():
+            if fragment in url:
+                ctxId = self.contextsByFrame.get(frameId)
+                if ctxId is not None:
+                    return ctxId
+        return None
+
     async def waitForFunction(
         self,
         expression: str,
@@ -136,6 +203,22 @@ class Page:
                 raise RuntimeError(f"element not found: {selector}")
             await asyncio.sleep(0.1)
 
+    async def _clickPoint(self, x: float, y: float, clickCount: int = 1) -> None:
+        await self._send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+        await self._send(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": clickCount},
+        )
+        await self._send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": clickCount},
+        )
+
+    async def _typeText(self, text: str) -> None:
+        for char in text:
+            await self._send("Input.dispatchKeyEvent", {"type": "keyDown", "text": char})
+            await self._send("Input.dispatchKeyEvent", {"type": "keyUp", "text": char})
+
     async def click(
         self,
         selector: str,
@@ -147,15 +230,7 @@ class Page:
         quad = box["model"]["content"]
         x = (quad[0] + quad[4]) / 2
         y = (quad[1] + quad[5]) / 2
-        await self._send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
-        await self._send(
-            "Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
-        )
-        await self._send(
-            "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
-        )
+        await self._clickPoint(x, y)
 
     async def type(
         self,
@@ -165,6 +240,4 @@ class Page:
         timeoutMs: int = DEFAULT_TIMEOUT_MS,
     ) -> None:
         await self.click(selector, mode, timeoutMs)
-        for char in text:
-            await self._send("Input.dispatchKeyEvent", {"type": "keyDown", "text": char})
-            await self._send("Input.dispatchKeyEvent", {"type": "keyUp", "text": char})
+        await self._typeText(text)
