@@ -7,6 +7,13 @@ from .constants import DEFAULT_TIMEOUT_MS, STEALTH_SCRIPT
 from .mode import Mode
 
 
+class NavigationError(RuntimeError):
+    def __init__(self, url: str, errorText: str) -> None:
+        self.url: str = url
+        self.errorText: str = errorText
+        super().__init__(f"navigation to {url} failed: {errorText}")
+
+
 class Page:
     def __init__(self, connection: CdpConnection, sessionId: str, targetId: str) -> None:
         self.connection: CdpConnection = connection
@@ -28,7 +35,7 @@ class Page:
             {"source": STEALTH_SCRIPT},
         )
 
-    async def _waitForLoad(self, timeoutMs: int = DEFAULT_TIMEOUT_MS) -> None:
+    def _loadFuture(self, timeoutMs: int = DEFAULT_TIMEOUT_MS) -> asyncio.Future:
         loadComplete = asyncio.get_event_loop().create_future()
 
         def onLoad(params: dict, sessionId: Optional[str]) -> None:
@@ -36,7 +43,10 @@ class Page:
                 loadComplete.set_result(True)
 
         self.connection.on("Page.loadEventFired", onLoad)
-        await asyncio.wait_for(loadComplete, timeoutMs / 1000)
+        return loadComplete
+
+    async def _waitForLoad(self, timeoutMs: int = DEFAULT_TIMEOUT_MS) -> None:
+        await asyncio.wait_for(self._loadFuture(timeoutMs), timeoutMs / 1000)
 
     async def evaluateOnNewDocument(self, source: str) -> str:
         result = await self._send(
@@ -52,8 +62,20 @@ class Page:
     async def waitForNavigation(self, timeoutMs: int = DEFAULT_TIMEOUT_MS) -> None:
         await self._waitForLoad(timeoutMs)
 
+    async def reload(self, timeoutMs: int = DEFAULT_TIMEOUT_MS) -> None:
+        loadComplete = self._loadFuture(timeoutMs)
+        await self._send("Page.reload")
+        await asyncio.wait_for(loadComplete, timeoutMs / 1000)
+
     async def goto(self, url: str) -> None:
-        await self._send("Page.navigate", {"url": url})
+        loadComplete = self._loadFuture()
+        result = await self._send("Page.navigate", {"url": url})
+        if result.get("errorText"):
+            raise NavigationError(url, result["errorText"])
+        await asyncio.wait_for(loadComplete, DEFAULT_TIMEOUT_MS / 1000)
+        result = await self._send("Page.navigate", {"url": url})
+        if result.get("errorText"):
+            raise NavigationError(url, result["errorText"])
         await self._waitForLoad()
 
     async def evaluate(self, expression: str) -> Any:
