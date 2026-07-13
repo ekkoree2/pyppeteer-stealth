@@ -89,6 +89,24 @@ class Page:
         )
         return result.get("result", {}).get("value")
 
+    async def waitForFunction(
+        self,
+        expression: str,
+        timeoutMs: int = DEFAULT_TIMEOUT_MS,
+        pollMs: int = 500,
+    ) -> Any:
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeoutMs / 1000
+        while True:
+            value = await self.evaluate(expression)
+            if value:
+                return value
+            if loop.time() >= deadline:
+                raise asyncio.TimeoutError(
+                    f"waitForFunction timed out after {timeoutMs}ms: {expression}"
+                )
+            await asyncio.sleep(pollMs / 1000)
+
     async def content(self) -> str:
         return await self.evaluate("document.documentElement.outerHTML")
 
