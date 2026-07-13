@@ -28,7 +28,7 @@ class Page:
             {"source": STEALTH_SCRIPT},
         )
 
-    async def goto(self, url: str) -> None:
+    async def _waitForLoad(self, timeoutMs: int = DEFAULT_TIMEOUT_MS) -> None:
         loadComplete = asyncio.get_event_loop().create_future()
 
         def onLoad(params: dict, sessionId: Optional[str]) -> None:
@@ -36,8 +36,25 @@ class Page:
                 loadComplete.set_result(True)
 
         self.connection.on("Page.loadEventFired", onLoad)
+        await asyncio.wait_for(loadComplete, timeoutMs / 1000)
+
+    async def evaluateOnNewDocument(self, source: str) -> str:
+        result = await self._send(
+            "Page.addScriptToEvaluateOnNewDocument", {"source": source}
+        )
+        return result.get("identifier")
+
+    async def removeInitScript(self, identifier: str) -> None:
+        await self._send(
+            "Page.removeScriptToEvaluateOnNewDocument", {"identifier": identifier}
+        )
+
+    async def waitForNavigation(self, timeoutMs: int = DEFAULT_TIMEOUT_MS) -> None:
+        await self._waitForLoad(timeoutMs)
+
+    async def goto(self, url: str) -> None:
         await self._send("Page.navigate", {"url": url})
-        await loadComplete
+        await self._waitForLoad()
 
     async def evaluate(self, expression: str) -> Any:
         result = await self._send(
